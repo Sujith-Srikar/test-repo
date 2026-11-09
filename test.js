@@ -3,22 +3,27 @@ const { DisconnectReason } = require("@whiskeysockets/baileys");
 const makeWASocket = require("@whiskeysockets/baileys").default;
 const axios = require("axios");
 const useDynamoDBAuthState = require("./dynamoAuthState");
+const {useMultiFileAuthState} = require("@whiskeysockets/baileys");
+const { error } = require("qrcode-terminal");
 
 // Global constants
-const authTable = "auth_info_baileys"; // For auth state
+// const authTable = "auth_info_baileys"; // For auth state
 const userTable = "user_info"; // For user data
 const ATTENDANCE_API =
   "https://a0qna69x15.execute-api.ap-southeast-2.amazonaws.com/dev/attendance";
 const HELP_DOC_LINK =
   "https://docs.google.com/document/d/185hlWtDBe9BICEBXIqC2EsRZV0N_uBRgdiAjP0Zo2YE/edit?usp=sharing";
 
+const featureUpdate = `🚀 *New Feature*: Skip Hours!\n\`skip <shortId> <hours-(Hours you to skip)>\`\nEg: \`skip 596 10\``;
+
 // Configure AWS DynamoDB client
 const dynamoDB = new AWS.DynamoDB.DocumentClient({ region: "ap-southeast-2" });
 
 async function whatsAppConnection() {
   try {
-    console.log("Connecting to DynamoDB...");
-    const { state, saveCreds } = await useDynamoDBAuthState(authTable);
+    const { state, saveCreds } = await useMultiFileAuthState(
+      "auth_info_baileys"
+    );
 
     const sock = makeWASocket({
       printQRInTerminal: true,
@@ -48,30 +53,6 @@ async function whatsAppConnection() {
   }
 }
 
-async function logout(sock) {
-  try {
-    console.log("Logging out...");
-
-    const {state, clearCreds} = await useDynamoDBAuthState(authTable);
-    if(!state.creds)
-      return;
-
-    await clearCreds();
-    console.log("credentials Cleared");
-
-    if(sock){
-      await sock.logout();
-      console.log("Logged out.");
-    }
-
-    setTimeout(()=>{
-      whatsAppConnection();
-    },3000);
-  } catch (error) {
-    console.error("Error logging out:", error);
-  }
-}
-
 async function sendMessage(sock, to, text) {
   try {
     await sock.sendMessage(to, { text });
@@ -90,6 +71,7 @@ function buildAttendanceMessage(data) {
       ? `\nYou need to attend ${total_info.additional_hours_needed} more hours to reach 75%.`
       : `\nYou can skip ${total_info.hours_can_skip} hours and still maintain above 75%.`;
 
+  message+=`\n\n${featureUpdate}\n`;    
   if (attendance_summary.length > 0 && attendance_summary[0].subject) {
     message += `\n\nToday's Attendance:\n`;
     attendance_summary.forEach(({ subject, attendance_today }) => {
@@ -114,31 +96,35 @@ async function fetchAttendanceData(rollNumber, password) {
     return response.data;
   } catch (error) {
     console.error("Error fetching attendance data:", error);
+    throw error;
   }
 }
 
 async function handleDirectCommand(rollNumber, password, fromNumber, sock) {
   try {
     const response = await fetchAttendanceData(rollNumber, password);
-    const attendanceMessage = buildAttendanceMessage(response.data);
+    const attendanceMessage = buildAttendanceMessage(response);
     await sendMessage(sock, fromNumber, attendanceMessage);
     console.log("Sent attendance data back to user.");
   } catch (error) {
     console.error("Error fetching attendance data:", error);
+    const msg=
+      "Invalid roll number or password.\n\nFor help, click here: " +HELP_DOC_LINK+"\n\n"+featureUpdate;
     await sendMessage(
       sock,
       fromNumber,
-      "Invalid roll number or password.\n\nFor help, click here: " +HELP_DOC_LINK
+      msg
     );
   }
 }
 
 async function handleSetCommand(words, fromNumber, sock) {
   if (words.length < 4) {
+    const msg = "Invalid format. Use: set <short_id> <roll_number> <password>\n\nFor help, click here: " +HELP_DOC_LINK+"\n\n"+featureUpdate;
     await sendMessage(
       sock,
       fromNumber,
-      "Invalid format. Use: set <short_id> <roll_number> <password>\n\nFor help, click here: " +HELP_DOC_LINK
+      msg
     );
     return;
   }
@@ -160,12 +146,14 @@ async function handleSetCommand(words, fromNumber, sock) {
       (cred) => cred.rollNumber === rollNumber
     );
     if (existingRollNumber) {
+      const msg =
+        `⚠️ This roll number is already linked to short form: ${existingRollNumber.shortId}\n\n` +
+        `To delete it, type: delete ${existingRollNumber.shortId}\n\nFor help, click here: ` +
+        HELP_DOC_LINK+"\n\n"+featureUpdate;
       await sendMessage(
         sock,
         fromNumber,
-        `⚠️ This roll number is already linked to short form: ${existingRollNumber.shortId}\n\n` +
-          `To delete it, type: delete ${existingRollNumber.shortId}\n\nFor help, click here: ` +
-          HELP_DOC_LINK
+        msg
       );
       return;
     }
@@ -179,14 +167,16 @@ async function handleSetCommand(words, fromNumber, sock) {
       await sendMessage(
         sock,
         fromNumber,
-        `Updated the short form ${shortId} with new roll number and password.`
+        `Updated the short form ${shortId} with new roll number and password.`+"\n\n"+featureUpdate
       );
     } else {
       userCredentials.push({ shortId, rollNumber, password });
       await sendMessage(
         sock,
         fromNumber,
-        `Short form saved: ${shortId}\n\nTo view all, type: shortforms`
+        `Short form saved: ${shortId}\n\nTo view all, type: shortforms` +
+          "\n\n" +
+          featureUpdate
       );
     }
 
@@ -201,7 +191,9 @@ async function handleSetCommand(words, fromNumber, sock) {
     await sendMessage(
       sock,
       fromNumber,
-      "Invalid roll number or password. Please try again."
+      "Invalid roll number or password. Please try again." +
+        "\n\n" +
+        featureUpdate
     );
   }
 }
@@ -224,10 +216,9 @@ async function handleShortFormRetrieval(shortId, fromNumber, sock) {
         fromNumber,
         sock
       );
-      return;
+      return true;
     }
   }
-  await sendMessage(sock, fromNumber, "Short form not found.");
 }
 
 async function handleDeleteCommand(words, fromNumber, sock) {
@@ -236,7 +227,9 @@ async function handleDeleteCommand(words, fromNumber, sock) {
       sock,
       fromNumber,
       "Invalid format. Use: delete <short_id>\n\nFor help, click here: " +
-        HELP_DOC_LINK
+        HELP_DOC_LINK +
+        "\n\n" +
+        featureUpdate
     );
     return;
   }
@@ -266,14 +259,18 @@ async function handleDeleteCommand(words, fromNumber, sock) {
       await sendMessage(
         sock,
         fromNumber,
-        `Short form ${shortIdToDelete} has been deleted.`
+        `Short form ${shortIdToDelete} has been deleted.` +
+          "\n\n" +
+          featureUpdate
       );
     } else {
       await sendMessage(
         sock,
         fromNumber,
         `No short form found with the ID: ${shortIdToDelete}\n\nFor help, click here: ` +
-          HELP_DOC_LINK
+          HELP_DOC_LINK +
+          "\n\n" +
+          featureUpdate
       );
     }
   } else {
@@ -281,7 +278,9 @@ async function handleDeleteCommand(words, fromNumber, sock) {
       sock,
       fromNumber,
       "You have no saved short forms to delete.\n\nFor help, click here: " +
-        HELP_DOC_LINK
+        HELP_DOC_LINK +
+        "\n\n" +
+        featureUpdate
     );
   }
 }
@@ -304,13 +303,18 @@ async function handleShowShortForms(fromNumber, sock) {
     });
     shortformMessage +=
       `\nTo delete a short form, type: delete <short_id>\n\nFor help, click here: ` +
-      HELP_DOC_LINK;
+      HELP_DOC_LINK +
+      "\n\n" +
+      featureUpdate;
     await sendMessage(sock, fromNumber, shortformMessage);
   } else {
     await sendMessage(
       sock,
       fromNumber,
-      "You have no saved short forms.\n\nFor help, click here: " + HELP_DOC_LINK
+      "You have no saved short forms.\n\nFor help, click here: " +
+        HELP_DOC_LINK +
+        "\n\n" +
+        featureUpdate
     );
   }
 }
@@ -332,6 +336,10 @@ To save, type:
 _Example:_
 \`set 596 22L31A0596 password\`
   
+🚀 New Feature: Skip Hours!\n
+\`skip <shortId> <hours>\`
+\nEg: \`skip 596 10\`
+
 To delete a saved short form:
 \`delete short_form_id\`
   
@@ -346,7 +354,7 @@ Enjoy! 😊`;
 
 async function handleSkipCommand(words, fromNumber, sock) {
   try {
-    const [command, hours] = words;
+    const [_, shortId, hours] = words;
     const userInfo = await dynamoDB
       .get({
         TableName: userTable,
@@ -355,9 +363,13 @@ async function handleSkipCommand(words, fromNumber, sock) {
       .promise();
 
     if (userInfo.Item && userInfo.Item.credentials) {
-      const { rollNumber, password } = userInfo.Item.credentials[0];
-      const response = await axios.get(
-        "https://a0qna69x15.execute-api.ap-southeast-2.amazonaws.com/dev/skip",{
+      const matchingCredential = userInfo.Item.credentials.find(
+      (cred) => cred.shortId === shortId
+    );
+      if (matchingCredential) {
+          const { rollNumber, password } = matchingCredential;
+          const response = await axios.get(
+            "https://a0qna69x15.execute-api.ap-southeast-2.amazonaws.com/dev/skip",{
           params: {
             student_id: rollNumber,
             password,
@@ -366,24 +378,54 @@ async function handleSkipCommand(words, fromNumber, sock) {
         }
       );
       
-      let message = `Attendance report after skipping ${hours} hours:\n\n`;
+      let message = `📊 *Attendance Report* (After Skipping ${hours} Hours)\n\n`;
 
-      message += `New attendance % : ${response.data.new_attendance_percentage}%\n`;
-      message += `Original attendance % : ${response.data.original_attendance_percentage}%\n`;
-      message += `${response.data.status}\n\n`;
-      message += `Hours left to skip : ${response.data.hours_can_skip_after}\n`;
+      message += `📉 *Original Attendance:* ${response.data.original_attendance_percentage}%\n`;
+      message += `✅ *New Attendance:* ${response.data.new_attendance_percentage}%\n`;
+      message += `ℹ️ ${response.data.status}\n\n`;
+
+      if (response.data.hours_can_skip_after) {
+        message += `⏳ *Hours Left to Skip:* ${response.data.hours_can_skip_after}\n`;
+      } else {
+        message += `📅 *Hours Left to Attend:* ${response.data.additional_hours_needed_after}\n`;
+      }
 
       await sendMessage(sock, fromNumber, message);
+        }
+      else {
+      throw error}
     }
   } catch (error) {
     console.log("Error handling skip command:", error);
+    await sock.sendMessage(
+      fromNumber,
+      {
+        text: `Check your short form and try again.\n\nFor help, click here: ${HELP_DOC_LINK}`,
+      })
+  }
+  
+}
+
+async function handleCompareCommand(words, fromNumber, sock) {
+  try {
+    const response = await axios.post(
+      "https://a0qna69x15.execute-api.ap-southeast-2.amazonaws.com/dev/compare",{
+        words
+      }
+    );
+
+    let message = `Comparison Result:\n\n`;
+    message += `Student 1: ${response.data.students}\n`;
+  } catch (error) {
+    console.error("Error handling compare command:", error);
   }
 }
 
 async function handleIncomingMessages(sock) {
   sock.ev.on("messages.upsert", async ({ messages }) => {
     const message = messages[0];
-    if (message.key.fromMe) return; // Ignore bot's own messages
+    if (message.key.fromMe)
+      return; // Ignore bot's own messages
 
     console.log("Received message:", message);
     const msgText =
@@ -399,7 +441,7 @@ async function handleIncomingMessages(sock) {
     if (words.length === 2 && /^[0-9]/.test(words[0])) {
       return await handleDirectCommand(words[0], words[1], fromNumber, sock);
     }
-
+    x=true
     // Command routing
     switch (command) {
       case "set":
@@ -410,13 +452,14 @@ async function handleIncomingMessages(sock) {
         return await handleShowShortForms(fromNumber, sock);
       case "skip":
         return await handleSkipCommand(words, fromNumber, sock);
-      case "logout":
-        return await logout(sock);
       default:
-        // If the command doesn't match any above, try to see if it's a short form retrieval.
-        await handleShortFormRetrieval(msgText, fromNumber, sock);
-        // If retrieval fails (i.e. no matching short form), send the default help message.
-        return await handleDefaultMessage(fromNumber, sock);
+        {
+          // If the command doesn't match any above, try to see if it's a short form retrieval.
+          x=await handleShortFormRetrieval(msgText, fromNumber, sock);
+          if(!x)
+            // If retrieval fails (i.e. no matching short form), send the default help message.
+            return await handleDefaultMessage(fromNumber, sock);
+      }
     }
   });
 }
